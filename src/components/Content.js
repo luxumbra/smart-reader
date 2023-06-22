@@ -3,7 +3,6 @@ import { Comments } from './Comments';
 import { Details } from './Details';
 import { Files } from './Files';
 import { ReactMarkdown } from 'react-markdown/lib/react-markdown';
-
 import ChakraUIRenderer from 'chakra-ui-markdown-renderer';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
@@ -38,7 +37,7 @@ import { dracula } from 'react-syntax-highlighter/dist/esm/styles/hljs';
 import { SimulateTransaction } from './SimulateTransaction';
 import axios from 'axios';
 import { uploadJSON } from '../utils/ipfs';
-import { useAccount, useSigner, useNetwork, useToken } from 'wagmi';
+import { useAccount, useSigner, useNetwork } from 'wagmi';
 import { getExplanation } from '../utils/queries';
 import { ipfsGateway } from '../utils/constants';
 import { getContract } from '../utils/contract';
@@ -47,6 +46,8 @@ import chainInfo from '../utils/chainInfo';
 import { ArrowUpIcon, ChatIcon } from '@chakra-ui/icons';
 import { Annotate } from './Annotate';
 import { shortenAddress, validateContractAddress } from '../utils/helpers';
+import { Network, Alchemy } from 'alchemy-sdk';
+
 
 const functionMessages = [
   'Deciphering the function',
@@ -76,7 +77,6 @@ const CustomTab = React.forwardRef((props, ref) => {
   const tabProps = useTab({ ...props, ref })
   const isSelected = !!tabProps['aria-selected']
   const isDisabled = !!tabProps['aria-disabled']
-  console.log('tabProps', isDisabled, tabProps['aria-disabled']);
   const bg = isDisabled ? 'red' : isSelected ? '#FFFFFF40' : 'transparent'
   const bgHover = isDisabled ? 'transparent' : '#ffffff40'
   const cursor = isDisabled ? 'not-allowed' : 'pointer'
@@ -98,7 +98,7 @@ export const Content = ({ address, fetching, setFetching }) => {
   const [selectedFunctionName, setSelectedFunctionName] = useState(null);
   const [selectedFunctionCode, setSelectedFunctionCode] = useState(null);
   const [selectedDependencyName, setSelectedDependencyName] = useState(null);
-
+  const [contractMetadata, setContractMetadata] = useState(null);
   const [isLoadingContract, setIsLoadingContract] = useState(false);
   const [isLoadingFunction, setIsLoadingFunction] = useState(false);
   const [isLoadingDependency, setIsLoadingDependency] = useState(false);
@@ -117,7 +117,7 @@ export const Content = ({ address, fetching, setFetching }) => {
   const network = chain?.name?.toLowerCase();
   const { address: userAddress, isConnected } = useAccount();
   const { data: signer } = useSigner();
-  const { APIKEY, blockExplorerApi, blockExplorerUrl } = chainInfo({ chain });
+  const { APIKEY, blockExplorerApi, blockExplorerUrl, alchemyUrl, ALCHEMY_API_KEY } = chainInfo({ chain });
   const { onCopy, value, setValue, hasCopied } = useClipboard('');
   const [isFetchingCreator, setIsFetchingCreator] = useState(false);
   const [contractCreation, setContractCreation] = useState({
@@ -128,6 +128,8 @@ export const Content = ({ address, fetching, setFetching }) => {
     isValid: false,
     message: ''
   });
+  const [tokenData, setTokenData] = useState(null)
+
   const mainContentRef = useRef(null);
 
   useEffect(() => {
@@ -148,10 +150,6 @@ export const Content = ({ address, fetching, setFetching }) => {
   useEffect(() => {
     if (sourceCode && sourceCode.length > 0) {
       setInspectContract(sourceCode[0]);
-      // console.log('sourceCode', sourceCode);
-      const name = sourceCode[0].name ?? 'Name not found';
-      const contractDisplayName = name.substring(name.lastIndexOf("/") + 1);
-      setContractName(contractDisplayName);
     }
   }, [sourceCode, chain?.id]);
 
@@ -297,32 +295,32 @@ export const Content = ({ address, fetching, setFetching }) => {
 
   function extractContracts(contractString) {
     try {
-    const contractsArray = [];
+      const contractsArray = [];
 
-    let contractStart = contractString?.indexOf('contract ');
-    let braceCount = 0;
-    let i = contractStart;
+      let contractStart = contractString?.indexOf('contract ');
+      let braceCount = 0;
+      let i = contractStart;
 
-    while (i < contractString.length) {
-      if (contractString[i] === '{') {
-        braceCount++;
-      } else if (contractString[i] === '}') {
-        braceCount--;
-        if (braceCount === 0) {
-          contractsArray.push(contractString.slice(contractStart, i + 1));
-          contractStart = contractString.indexOf('contract ', i + 1);
+      while (i < contractString.length) {
+        if (contractString[i] === '{') {
+          braceCount++;
+        } else if (contractString[i] === '}') {
+          braceCount--;
+          if (braceCount === 0) {
+            contractsArray.push(contractString.slice(contractStart, i + 1));
+            contractStart = contractString.indexOf('contract ', i + 1);
+          }
         }
+        i++;
       }
-      i++;
-    }
-    const contracts = {};
-    Object.entries(contractsArray).forEach(([index, sourceCode]) => {
-      const nameStart = sourceCode.indexOf('contract ') + 9;
-      const nameEnd = sourceCode.indexOf(' ', nameStart);
-      const name = sourceCode.slice(nameStart, nameEnd);
+      const contracts = {};
+      Object.entries(contractsArray).forEach(([index, sourceCode]) => {
+        const nameStart = sourceCode.indexOf('contract ') + 9;
+        const nameEnd = sourceCode.indexOf(' ', nameStart);
+        const name = sourceCode.slice(nameStart, nameEnd);
 
-      contracts[name] = { content: sourceCode };
-    });
+        contracts[name] = { content: sourceCode };
+      });
 
       return contracts;
 
@@ -366,9 +364,44 @@ export const Content = ({ address, fetching, setFetching }) => {
       setFetching(true);
       fetchCreatorAndCreation(address)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address, fetchCreatorAndCreation])
 
 
+  const fetchTokenData = useCallback(async (address) => {
+    try {
+      const apiUrl = `${alchemyUrl}${ALCHEMY_API_KEY}`;
+      console.log('apiUrl', apiUrl);
+      if (!address) return null;
+      const options = {
+        method: 'POST',
+        url: apiUrl,
+        headers: {
+          'Content-Type': 'application/json',
+          accept: 'application/json',
+        },
+        data: {
+          id: chain?.id,
+          jsonrpc: '2.0',
+          method: 'alchemy_getTokenMetadata',
+          params: [address],
+        }
+      }
+
+      const res = await axios(options);
+      const {name, logo, symbol} = res.data.result;
+
+      setContractName(name);
+      setTokenData({
+        name,
+        logo,
+        symbol,
+      });
+    } catch (error) {
+      console.log('Alchemy error', error);
+      setContractName('Unknown');
+    }
+  }, [ALCHEMY_API_KEY, alchemyUrl, chain?.id]);
 
   const fetchSourceCode = useCallback(async () => {
     try {
@@ -386,6 +419,7 @@ export const Content = ({ address, fetching, setFetching }) => {
         });
         throw new Error(message);
       }
+      console.log('resp.data.result[0].SourceCode', resp.data.result[0].SourceCode);
 
       try {
         sourceObj = JSON.parse(resp.data.result[0].SourceCode.slice(1, -1));
@@ -399,6 +433,7 @@ export const Content = ({ address, fetching, setFetching }) => {
       contractsArray = Object.entries(contracts).map(([name, sourceCode]) => {
         return { name, sourceCode };
       });
+
 
       const addressABI = JSON.parse(resp.data.result[0].ABI);
 
@@ -419,7 +454,7 @@ export const Content = ({ address, fetching, setFetching }) => {
       console.log('fetch source code error', err);
       setFetching(false);
       setSourceCode([]);
-      setContractName('Contract name');
+      setContractName('Unknown');
       setExplanationError('')
       setContractExplanation('');
       setInspectContract(undefined);
@@ -439,9 +474,10 @@ export const Content = ({ address, fetching, setFetching }) => {
     setExplanationError('')
     setContractExplanation('');
     if (fetching) {
+      fetchTokenData(address);
       fetchSourceCode();
     }
-  }, [fetching, fetchSourceCode, setFetching, address, chain?.id]);
+  }, [fetching, fetchSourceCode, setFetching, address, chain.id, fetchTokenData]);
 
   const handleContractChange = useCallback(
     (e) => {
@@ -591,8 +627,6 @@ export const Content = ({ address, fetching, setFetching }) => {
   ]);
 
 
-  console.log('in content')
-
   return (
     <Stack h='full' w='full' background="#FFFFFF1A" backdropFilter="blur(8px)" p={6} borderRadius='8px' gap={8} zIndex={0}>
       {!userAddress ? (
@@ -652,7 +686,7 @@ export const Content = ({ address, fetching, setFetching }) => {
             </Link>
           </Flex>
         ) : (
-          <Text fontSize='sm'>{!userAddress ? 'Connect your wallet' : !validationResult.result ? 'No valid address' :  'No contract selected'}</Text>
+          <Text fontSize='sm'>{!userAddress ? 'Connect your wallet' : !validationResult.result ? 'No valid address' : 'No contract selected'}</Text>
         )}
       </Stack>
       <Files sourceCode={sourceCode} handleClick={handleContractChange} />
@@ -770,102 +804,102 @@ export const Content = ({ address, fetching, setFetching }) => {
             justifyItems="space-between"
           >
             <code>Simulate function: {inspectFunction.name}</code>
-          <ModalCloseButton color="white" top="25%" />
+            <ModalCloseButton color="white" top="25%" />
           </ModalHeader>
           <ModalBody py={6}>
             <Box flexGrow={0} w="100%" h="100%" overflowY="auto" pb={8} borderRadius="xl">
-            {inspectFunction &&
-              Object.values(inspectFunction).every(
-                (value) => !value
-              ) ? null : (
-              <Flex flexDirection={'column'} gap={3}>
-                <Flex gap={3} border="1px solid red">
-                  <Flex
-                    flexGrow={1}
-                    w="50%"
-                    maxH="600px"
-                    overflowY="auto"
-                    direction="column"
-                        gap={3}
-                        border="1px solid red"
-                  >
-                    <Flex gap={3}>
-                      <Image src="/images/sourcecode.png" w={6} />
-                      <Text fontWeight="bold"> Source code </Text>
-                    </Flex>
+              {inspectFunction &&
+                Object.values(inspectFunction).every(
+                  (value) => !value
+                ) ? null : (
+                <Flex flexDirection={'column'} gap={3}>
+                  <Flex gap={3} border="1px solid red">
                     <Flex
-                      p={2}
-                      bg="rgb(40, 42, 54)"
-                      overflow="hidden"
-                      borderRadius={16}
+                      flexGrow={1}
+                      w="50%"
+                      maxH="600px"
+                      overflowY="auto"
+                      direction="column"
+                      gap={3}
+                      border="1px solid red"
                     >
-                      <SyntaxHighlighter
-                        language="solidity"
-                        style={dracula}
-                        wrapLines={true}
-                      >
-                        {inspectFunction.code ? inspectFunction.code : ''}
-                      </SyntaxHighlighter>
-                    </Flex>
-                  </Flex>
-
-                      <Box
-                        w="50%"
-                        maxH="600px"
-                        overflowY="auto"
-                        direction="column"
-                        gap={3}
-                      >
-                    {isLoadingFunction && (
+                      <Flex gap={3}>
+                        <Image src="/images/sourcecode.png" w={6} />
+                        <Text fontWeight="bold"> Source code </Text>
+                      </Flex>
                       <Flex
+                        p={2}
+                        bg="rgb(40, 42, 54)"
+                        overflow="hidden"
+                        borderRadius={16}
+                      >
+                        <SyntaxHighlighter
+                          language="solidity"
+                          style={dracula}
+                          wrapLines={true}
+                        >
+                          {inspectFunction.code ? inspectFunction.code : ''}
+                        </SyntaxHighlighter>
+                      </Flex>
+                    </Flex>
+
+                    <Box
+                      w="50%"
+                      maxH="600px"
+                      overflowY="auto"
+                      direction="column"
+                      gap={3}
+                    >
+                      {isLoadingFunction && (
+                        <Flex
                           w="full"
                           h="full"
-                        justifyContent="center"
+                          justifyContent="center"
                           alignItems="center"
                           flexDirection={'column'}
                           rowGap={3}
-                      >
-                        <Spinner />
-                        <Text>
-                          {
-                            functionMessages[
-                            Math.floor(Math.random() * 5)
-                            ]
-                          }
-                        </Text>
-                      </Flex>
-                    )}
-
-                    {!isLoadingFunction && (
-                      <Flex direction="column" gap={3} h="full">
-                        <Flex gap={3}>
-                          <Image src="/images/explanation.png" w={6} />
-                          <Text fontWeight="bold">Explanation</Text>
-                        </Flex>
-                        <Text
-                          boxShadow="0px 4px 4px rgba(0, 0, 0, 0.25)"
-                              borderRadius={16}
-                              flex={1}
-                          h="full"
-                          p={4}
                         >
-                          {functionExplanation}
-                        </Text>
-                      </Flex>
-                    )}
-                  </Box>
+                          <Spinner />
+                          <Text>
+                            {
+                              functionMessages[
+                              Math.floor(Math.random() * 5)
+                              ]
+                            }
+                          </Text>
+                        </Flex>
+                      )}
+
+                      {!isLoadingFunction && (
+                        <Flex direction="column" gap={3} h="full">
+                          <Flex gap={3}>
+                            <Image src="/images/explanation.png" w={6} />
+                            <Text fontWeight="bold">Explanation</Text>
+                          </Flex>
+                          <Text
+                            boxShadow="0px 4px 4px rgba(0, 0, 0, 0.25)"
+                            borderRadius={16}
+                            flex={1}
+                            h="full"
+                            p={4}
+                          >
+                            {functionExplanation}
+                          </Text>
+                        </Flex>
+                      )}
+                    </Box>
+                  </Flex>
+                  {inspectFunction && address && network && contractABI && (
+                    <SimulateTransaction
+                      address={address}
+                      network={network}
+                      contractABI={contractABI}
+                      inspectFunction={inspectFunction}
+                      userAddress={userAddress}
+                      isConnected={isConnected}
+                    />
+                  )}
                 </Flex>
-                {inspectFunction && address && network && contractABI && (
-                  <SimulateTransaction
-                    address={address}
-                    network={network}
-                    contractABI={contractABI}
-                    inspectFunction={inspectFunction}
-                    userAddress={userAddress}
-                    isConnected={isConnected}
-                  />
-                )}
-              </Flex>
               )}
             </Box>
           </ModalBody>
